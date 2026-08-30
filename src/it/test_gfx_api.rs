@@ -5,13 +5,16 @@ use crate::allocator::BufferUsage;
 use crate::backend::DrmDeviceId;
 use crate::cmm::cmm_description::ColorDescription;
 use crate::cmm::cmm_description::LinearColorDescription;
+use crate::cmm::cmm_eotf::Eotf;
 use crate::cpu_worker::CpuWorker;
 use crate::format::ARGB8888;
 use crate::format::Format;
 use crate::format::XRGB8888;
 use crate::gfx_api::AcquireSync;
+use crate::gfx_api::AlphaMode;
 use crate::gfx_api::AsyncShmGfxTexture;
 use crate::gfx_api::AsyncShmGfxTextureCallback;
+use crate::gfx_api::Blur;
 use crate::gfx_api::CopyTexture;
 use crate::gfx_api::FdSync;
 use crate::gfx_api::FillRect;
@@ -261,6 +264,10 @@ impl GfxContext for TestGfxCtx {
 
     fn syncobj_ctx(&self) -> Option<&Rc<SyncobjCtx>> {
         None
+    }
+
+    fn supports_background_blur(&self, _width: i32, _height: i32) -> bool {
+        true
     }
 
     fn acquire_blend_buffer(
@@ -561,6 +568,76 @@ impl GfxFramebuffer for TestGfxFb {
                 }
                 Ok(())
             };
+            let blur = |blur: &Blur, staging: &mut [Color]| {
+                let mut horizontal = vec![[0.0f32; 4]; staging.len()];
+                for y in 0..height {
+                    for x in 0..width {
+                        if !blur.horizontal_region.contains(x, y) {
+                            continue;
+                        }
+                        let dst = &mut horizontal[(y * width + x) as usize];
+                        for offset in 0..=blur.kernel.radius {
+                            let weight = (-(offset * offset) as f32
+                                / (2.0 * blur.kernel.sigma * blur.kernel.sigma))
+                                .exp()
+                                * blur.kernel.normalization;
+                            let xs = if offset == 0 {
+                                [x, x]
+                            } else {
+                                [(x - offset).max(0), (x + offset).min(width - 1)]
+                            };
+                            let count = match offset {
+                                0 => 1,
+                                _ => 2,
+                            };
+                            for x in &xs[..count] {
+                                let color =
+                                    staging[(y * width + *x) as usize].to_array(Eotf::Linear);
+                                for i in 0..4 {
+                                    dst[i] += color[i] * weight;
+                                }
+                            }
+                        }
+                    }
+                }
+                for y in 0..height {
+                    for x in 0..width {
+                        if !blur.paint_region.contains(x, y) {
+                            continue;
+                        }
+                        let mut color = [0.0f32; 4];
+                        for offset in 0..=blur.kernel.radius {
+                            let weight = (-(offset * offset) as f32
+                                / (2.0 * blur.kernel.sigma * blur.kernel.sigma))
+                                .exp()
+                                * blur.kernel.normalization;
+                            let ys = if offset == 0 {
+                                [y, y]
+                            } else {
+                                [(y - offset).max(0), (y + offset).min(height - 1)]
+                            };
+                            let count = match offset {
+                                0 => 1,
+                                _ => 2,
+                            };
+                            for y in &ys[..count] {
+                                let src = horizontal[(*y * width + x) as usize];
+                                for i in 0..4 {
+                                    color[i] += src[i] * weight;
+                                }
+                            }
+                        }
+                        staging[(y * width + x) as usize] = Color::new(
+                            Eotf::Linear,
+                            AlphaMode::PremultipliedOptical,
+                            color[0],
+                            color[1],
+                            color[2],
+                            color[3],
+                        );
+                    }
+                }
+            };
             let staging = &mut *self.staging.borrow_mut();
             copy_to_staging(staging);
             for op in ops {
@@ -568,6 +645,7 @@ impl GfxFramebuffer for TestGfxFb {
                     GfxApiOp::Sync => {}
                     GfxApiOp::FillRect(f) => fill_rect(&f, staging),
                     GfxApiOp::CopyTexture(c) => copy_texture(&c, staging)?,
+                    GfxApiOp::Blur(b) => blur(b, staging),
                 }
             }
             copy_from_staging(staging);

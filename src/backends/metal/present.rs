@@ -20,6 +20,7 @@ use crate::gfx_api::BufferResv;
 use crate::gfx_api::CopyTexture;
 use crate::gfx_api::DirectScanoutError;
 use crate::gfx_api::DirectScanoutPosition;
+use crate::gfx_api::GFX_HAS_BACKGROUND_BLUR;
 use crate::gfx_api::GfxRenderPass;
 use crate::gfx_api::GfxTexture;
 use crate::gfx_api::LazyTexture;
@@ -28,6 +29,7 @@ use crate::gfx_api::SyncFile;
 use crate::gfx_api::TextureUse;
 use crate::gfx_api::create_render_pass;
 use crate::ifs::wl_output::BlendSpace;
+use crate::rect::Rect;
 use crate::rect::Region;
 use crate::time::Time;
 use crate::tracy::FrameName;
@@ -682,13 +684,7 @@ impl MetalConnector {
             return None;
         }
         node.global.connector.damaged.set(false);
-        let damage = {
-            node.add_visualizer_damage();
-            let damage = &mut *node.global.connector.damage.borrow_mut();
-            buffer.damage_queue.damage(damage);
-            damage.clear();
-            buffer.damage_queue.get()
-        };
+        node.add_visualizer_damage();
         let render_hw_cursor = !self.cursor_enabled.get();
         let mode = node.global.mode.get();
         let pass = create_render_pass(
@@ -706,6 +702,16 @@ impl MetalConnector {
             Some(&self.state.damage_visualizer),
             true,
         );
+        let damage = {
+            let damage = &mut *node.global.connector.damage.borrow_mut();
+            if pass.flags.intersects(GFX_HAS_BACKGROUND_BLUR) {
+                damage.clear();
+                damage.push(Rect::new_sized_saturating(0, 0, mode.width, mode.height));
+            }
+            buffer.damage_queue.damage(damage);
+            damage.clear();
+            buffer.damage_queue.get()
+        };
         Some(Latched {
             pass,
             damage_count,

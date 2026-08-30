@@ -1231,7 +1231,10 @@ impl OutputNode {
             return;
         }
         let (old_width, old_height) = self.pixel_size();
+        let had_background_blur = self.state.background_blur_supported();
         self.global.mode.set(mode);
+        self.state
+            .update_background_blur_capabilities(had_background_blur);
         self.global.refresh_nsec.set(mode.refresh_nsec());
         self.global.persistent.transform.set(transform);
         self.set_ns_transform(transform);

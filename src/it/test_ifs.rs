@@ -1,5 +1,7 @@
 pub mod test_alpha_modifier;
 pub mod test_alpha_modifier_surface;
+pub mod test_background_effect_manager;
+pub mod test_background_effect_surface;
 pub mod test_buffer;
 pub mod test_callback;
 pub mod test_compositor;

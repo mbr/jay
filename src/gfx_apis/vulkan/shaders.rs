@@ -12,6 +12,8 @@ pub const TEX_VERT: &[u8] = include_bytes!("shaders_bin/tex.vert.spv");
 pub const TEX_FRAG: &[u8] = include_bytes!("shaders_bin/tex.frag.spv");
 pub const OUT_VERT: &[u8] = include_bytes!("shaders_bin/out.vert.spv");
 pub const OUT_FRAG: &[u8] = include_bytes!("shaders_bin/out.frag.spv");
+pub const BLUR_VERT: &[u8] = include_bytes!("shaders_bin/blur.vert.spv");
+pub const BLUR_FRAG: &[u8] = include_bytes!("shaders_bin/blur.frag.spv");
 pub const LEGACY_FILL_VERT: &[u8] = include_bytes!("shaders_bin/legacy_fill.vert.spv");
 pub const LEGACY_FILL_FRAG: &[u8] = include_bytes!("shaders_bin/legacy_fill.frag.spv");
 pub const LEGACY_TEX_VERT: &[u8] = include_bytes!("shaders_bin/legacy_tex.vert.spv");
@@ -136,6 +138,26 @@ pub struct HeapOutPushConstants {
 }
 
 unsafe impl Packed for HeapOutPushConstants {}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct BlurPushConstants {
+    pub direction: [i32; 2],
+    pub radius: i32,
+    pub sigma: f32,
+    pub normalization: f32,
+}
+
+unsafe impl Packed for BlurPushConstants {}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct HeapBlurPushConstants {
+    pub push: BlurPushConstants,
+    pub heap_tex_set: HeapTexSet,
+}
+
+unsafe impl Packed for HeapBlurPushConstants {}
 
 impl VulkanDevice {
     pub(super) fn create_shader(

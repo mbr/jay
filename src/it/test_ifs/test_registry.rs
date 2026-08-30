@@ -2,6 +2,7 @@ use crate::globals::GlobalName;
 use crate::ifs::wl_seat::WlSeatGlobal;
 use crate::it::test_error::TestError;
 use crate::it::test_ifs::test_alpha_modifier::TestAlphaModifier;
+use crate::it::test_ifs::test_background_effect_manager::TestBackgroundEffectManager;
 use crate::it::test_ifs::test_compositor::TestCompositor;
 use crate::it::test_ifs::test_content_type_manager::TestContentTypeManager;
 use crate::it::test_ifs::test_cursor_shape_manager::TestCursorShapeManager;
@@ -60,6 +61,7 @@ pub struct TestRegistrySingletons {
     pub zwp_linux_dmabuf_v1: u32,
     pub xdg_toplevel_drag_manager_v1: u32,
     pub wp_alpha_modifier_v1: u32,
+    pub ext_background_effect_manager_v1: u32,
     pub zwp_virtual_keyboard_manager_v1: u32,
     pub zwp_input_method_manager_v2: u32,
     pub zwp_text_input_manager_v3: u32,
@@ -91,6 +93,7 @@ pub struct TestRegistry {
     pub dmabuf: CloneCell<Option<Rc<TestDmabuf>>>,
     pub drag_manager: CloneCell<Option<Rc<TestToplevelDragManager>>>,
     pub alpha_modifier: CloneCell<Option<Rc<TestAlphaModifier>>>,
+    pub background_effect_manager: CloneCell<Option<Rc<TestBackgroundEffectManager>>>,
     pub virtual_keyboard_manager: CloneCell<Option<Rc<TestVirtualKeyboardManager>>>,
     pub input_method_manager: CloneCell<Option<Rc<TestInputMethodManager>>>,
     pub text_input_manager: CloneCell<Option<Rc<TestTextInputManager>>>,
@@ -166,6 +169,7 @@ impl TestRegistry {
             zwp_linux_dmabuf_v1,
             xdg_toplevel_drag_manager_v1,
             wp_alpha_modifier_v1,
+            ext_background_effect_manager_v1,
             zwp_virtual_keyboard_manager_v1,
             zwp_input_method_manager_v2,
             zwp_text_input_manager_v3,
@@ -266,6 +270,13 @@ impl TestRegistry {
         wp_alpha_modifier_v1,
         1,
         TestAlphaModifier
+    );
+    create_singleton!(
+        get_background_effect_manager,
+        background_effect_manager,
+        ext_background_effect_manager_v1,
+        1,
+        TestBackgroundEffectManager
     );
     create_singleton!(
         get_virtual_keyboard_manager,

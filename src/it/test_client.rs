@@ -4,6 +4,7 @@ use crate::client::Client;
 use crate::globals::GlobalBase;
 use crate::it::test_error::TestError;
 use crate::it::test_error::TestResult;
+use crate::it::test_ifs::test_background_effect_manager::TestBackgroundEffectManager;
 use crate::it::test_ifs::test_compositor::TestCompositor;
 use crate::it::test_ifs::test_cursor_shape_manager::TestCursorShapeManager;
 use crate::it::test_ifs::test_data_device_manager::TestDataDeviceManager;
@@ -46,6 +47,7 @@ pub struct TestClient {
     pub data_device_manager: Rc<TestDataDeviceManager>,
     pub cursor_shape_manager: Rc<TestCursorShapeManager>,
     pub fifo_manager: Rc<TestFifoManager>,
+    pub background_effect_manager: Rc<TestBackgroundEffectManager>,
     pub pointer_warp: Rc<TestPointerWarp>,
 }
 

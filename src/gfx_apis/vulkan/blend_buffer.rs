@@ -30,6 +30,23 @@ impl VulkanRenderer {
         width: i32,
         height: i32,
     ) -> Result<Rc<VulkanImage>, VulkanError> {
+        self.acquire_blend_image(width, height, false)
+    }
+
+    pub(super) fn acquire_blur_buffer(
+        self: &Rc<Self>,
+        width: i32,
+        height: i32,
+    ) -> Result<Rc<VulkanImage>, VulkanError> {
+        self.acquire_blend_image(width, height, true)
+    }
+
+    fn acquire_blend_image(
+        self: &Rc<Self>,
+        width: i32,
+        height: i32,
+        blur: bool,
+    ) -> Result<Rc<VulkanImage>, VulkanError> {
         if self.device.uses_legacy_descriptors() {
             return Err(VulkanError::NoBlendBuffers);
         }
@@ -39,7 +56,7 @@ impl VulkanRenderer {
         let width = width as u32;
         let height = height as u32;
         let cached = &mut *self.blend_buffers.borrow_mut();
-        let cached = cached.entry((width, height));
+        let cached = cached.entry((width, height, blur));
         if let Entry::Occupied(entry) = &cached
             && let Some(buffer) = entry.get().upgrade()
         {

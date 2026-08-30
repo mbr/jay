@@ -448,6 +448,15 @@ impl GfxContext for Context {
         self.0.device.uses_descriptor_memory()
     }
 
+    fn supports_background_blur(&self, width: i32, height: i32) -> bool {
+        let limits = self.0.device.blend_limits;
+        self.0.device.uses_descriptor_memory()
+            && width > 0
+            && height > 0
+            && width as u32 <= limits.max_width
+            && height as u32 <= limits.max_height
+    }
+
     fn create_dmabuf_buffer(
         &self,
         dmabuf: &OwnedFd,

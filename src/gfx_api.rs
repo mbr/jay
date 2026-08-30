@@ -17,6 +17,7 @@ use crate::io_uring::PollCallback;
 use crate::rect::Rect;
 use crate::rect::Region;
 use crate::renderer::Renderer;
+use crate::renderer::create_blur_kernel;
 use crate::renderer::renderer_base::RenderTexture;
 use crate::renderer::renderer_base::RendererBase;
 use crate::scale::Scale;
@@ -116,6 +117,22 @@ pub enum GfxApiOp {
     Sync,
     FillRect(FillRect),
     CopyTexture(CopyTexture),
+    Blur(Blur),
+}
+
+#[derive(Clone)]
+pub struct Blur {
+    pub paint_region: Rc<Region>,
+    pub sample_region: Rc<Region>,
+    pub horizontal_region: Rc<Region>,
+    pub kernel: Rc<BlurKernel>,
+}
+
+#[derive(Clone)]
+pub struct BlurKernel {
+    pub radius: i32,
+    pub sigma: f32,
+    pub normalization: f32,
 }
 
 pub struct GfxRenderPass {
@@ -312,6 +329,7 @@ pub struct CopyTexture {
 bitflags! {
     GfxFlags: u32;
        GFX_HAS_LAZY,
+       GFX_HAS_BACKGROUND_BLUR,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Linearize)]
@@ -819,6 +837,7 @@ impl dyn GfxFramebuffer {
             },
             title_icons: None,
             bar_icons: None,
+            blur_kernel: None,
         };
         cursor.render_hardware_cursor(&mut renderer);
         let flags = renderer.base.flags;
@@ -1059,7 +1078,9 @@ pub trait GfxContext: Debug {
         false
     }
 
-    fn supports_background_blur(&self) -> bool {
+    fn supports_background_blur(&self, width: i32, height: i32) -> bool {
+        let _ = width;
+        let _ = height;
         false
     }
 
@@ -1210,6 +1231,9 @@ pub fn create_render_pass(
         },
         title_icons: state.icons.get_title_icons(state, scale),
         bar_icons: state.icons.get_bar_icons(state, scale),
+        blur_kernel: state
+            .background_blur_supported()
+            .then(|| create_blur_kernel(scale)),
     };
     node.node_render(&mut renderer, 0, 0, None);
     if let Some(rect) = cursor_rect {
@@ -1454,6 +1478,8 @@ pub enum DirectScanoutError {
     TextureVisible,
     #[error("Background could be visible")]
     BackgroundVisible,
+    #[error("Background effects require compositing")]
+    BackgroundEffect,
     #[error("Cannot perform scanout without explicit sync")]
     ImplicitSync,
     #[error("Rotations and mirroring are not supported")]
@@ -1490,6 +1516,9 @@ impl GfxRenderPass {
                             if !ct.skip_for_scanout {
                                 break 'ct2 ct;
                             }
+                        }
+                        GfxApiOp::Blur(_) => {
+                            return Err(DirectScanoutError::BackgroundEffect);
                         }
                     }
                 }
@@ -1530,6 +1559,9 @@ impl GfxRenderPass {
                     GfxApiOp::CopyTexture(_) => {
                         // Texture could be visible.
                         return Err(DirectScanoutError::TextureVisible);
+                    }
+                    GfxApiOp::Blur(_) => {
+                        return Err(DirectScanoutError::BackgroundEffect);
                     }
                 }
             }

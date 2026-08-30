@@ -871,14 +871,44 @@ impl State {
         }
     }
 
+    fn background_blur_supported_for(&self, ctx: Option<&Rc<dyn GfxContext>>) -> bool {
+        let Some(ctx) = ctx else {
+            return false;
+        };
+        let outputs = self.root.outputs.lock();
+        if outputs.is_empty() {
+            return ctx.supports_background_blur(1, 1);
+        }
+        outputs.values().all(|output| {
+            let mode = output.global.mode.get();
+            ctx.supports_background_blur(mode.width, mode.height)
+        })
+    }
+
+    pub fn background_blur_supported(&self) -> bool {
+        let ctx = self.render_ctx.get();
+        self.background_blur_supported_for(ctx.as_ref())
+    }
+
+    pub fn update_background_blur_capabilities(&self, had_background_blur: bool) {
+        if had_background_blur == self.background_blur_supported() {
+            return;
+        }
+        for manager in self.background_effect_managers.lock().values() {
+            manager.send_capabilities();
+        }
+        for client in self.clients.clients.borrow().values() {
+            for surface in client.data.objects.surfaces.lock().values() {
+                if surface.blur_region.is_some() {
+                    self.damage(surface.buffer_abs_pos[RenderTL].get());
+                }
+            }
+        }
+    }
+
     pub fn set_render_ctx(&self, ctx: Option<Rc<dyn GfxContext>>) {
-        let had_background_blur = self
-            .render_ctx
-            .get()
-            .is_some_and(|ctx| ctx.supports_background_blur());
-        let has_background_blur = ctx
-            .as_ref()
-            .is_some_and(|ctx| ctx.supports_background_blur());
+        let old_ctx = self.render_ctx.get();
+        let had_background_blur = self.background_blur_supported_for(old_ctx.as_ref());
         self.egg_state.clear();
         self.explicit_sync_supported.set(false);
         self.render_ctx.set(ctx.clone());
@@ -975,18 +1005,7 @@ impl State {
         for watcher in self.render_ctx_watchers.lock().values() {
             watcher.send_render_ctx(ctx.clone());
         }
-        if had_background_blur != has_background_blur {
-            for manager in self.background_effect_managers.lock().values() {
-                manager.send_capabilities();
-            }
-            for client in self.clients.clients.borrow().values() {
-                for surface in client.data.objects.surfaces.lock().values() {
-                    if surface.blur_region.is_some() {
-                        self.damage(surface.buffer_abs_pos[RenderTL].get());
-                    }
-                }
-            }
-        }
+        self.update_background_blur_capabilities(had_background_blur);
 
         let mut scs = vec![];
         for client in self.clients.clients.borrow_mut().values() {
@@ -1700,6 +1719,9 @@ impl State {
             },
             title_icons: None,
             bar_icons: None,
+            blur_kernel: self
+                .background_blur_supported()
+                .then(|| crate::renderer::create_blur_kernel(scale)),
         };
         let mut sample_rect = SampleRect::identity();
         sample_rect.buffer_transform = transform;

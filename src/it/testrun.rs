@@ -100,6 +100,7 @@ impl TestRun {
             data_device_manager: registry.get_data_device_manager().await?,
             cursor_shape_manager: registry.get_cursor_shape_manager().await?,
             fifo_manager: registry.get_fifo_manager().await?,
+            background_effect_manager: registry.get_background_effect_manager().await?,
             pointer_warp: registry.get_pointer_warp().await?,
             registry,
         }))

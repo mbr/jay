@@ -10,6 +10,7 @@ use crate::cmm::cmm_transform::ColorMatrix;
 use crate::cpu_worker::PendingJob;
 use crate::gfx_api::AcquireSync;
 use crate::gfx_api::AlphaMode;
+use crate::gfx_api::Blur;
 use crate::gfx_api::BufferResv;
 use crate::gfx_api::BufferResvUser;
 use crate::gfx_api::FdSync;
@@ -49,11 +50,15 @@ use crate::gfx_apis::vulkan::pipeline::PipelineCreateInfo;
 use crate::gfx_apis::vulkan::pipeline::VulkanPipeline;
 use crate::gfx_apis::vulkan::sampler::VulkanSampler;
 use crate::gfx_apis::vulkan::semaphore::VulkanSemaphore;
+use crate::gfx_apis::vulkan::shaders::BLUR_FRAG;
+use crate::gfx_apis::vulkan::shaders::BLUR_VERT;
+use crate::gfx_apis::vulkan::shaders::BlurPushConstants;
 use crate::gfx_apis::vulkan::shaders::ColorManagementData;
 use crate::gfx_apis::vulkan::shaders::EotfArgs;
 use crate::gfx_apis::vulkan::shaders::FILL_FRAG;
 use crate::gfx_apis::vulkan::shaders::FILL_VERT;
 use crate::gfx_apis::vulkan::shaders::FillPushConstants;
+use crate::gfx_apis::vulkan::shaders::HeapBlurPushConstants;
 use crate::gfx_apis::vulkan::shaders::HeapOutPushConstants;
 use crate::gfx_apis::vulkan::shaders::HeapTexPushConstants;
 use crate::gfx_apis::vulkan::shaders::HeapTexSet;
@@ -179,6 +184,8 @@ pub struct VulkanRenderer {
     pub(super) out_pipelines:
         StaticMap<VulkanEotf, CopyHashMap<OutPipelineKey, Rc<VulkanPipeline>>>,
     pub(super) out_frag_bindings: FragBindings,
+    pub(super) blur_frag_bindings: FragBindings,
+    pub(super) blur_pipeline: CloneCell<Option<Rc<VulkanPipeline>>>,
     pub(super) gfx_command_buffers: CachedCommandBuffers,
     pub(super) transfer_command_buffers: Option<CachedCommandBuffers>,
     pub(super) wait_semaphores: Stack<Rc<VulkanSemaphore>>,
@@ -196,13 +203,15 @@ pub struct VulkanRenderer {
     pub(super) tex_frag_shader: Rc<VulkanShader>,
     pub(super) out_vert_shader: Option<Rc<VulkanShader>>,
     pub(super) out_frag_shader: Option<Rc<VulkanShader>>,
+    pub(super) blur_vert_shader: Option<Rc<VulkanShader>>,
+    pub(super) blur_frag_shader: Option<Rc<VulkanShader>>,
     pub(super) tex_descriptor_set_layouts: ArrayVec<Rc<VulkanDescriptorSetLayout>, 2>,
     pub(super) out_descriptor_set_layout: Option<Rc<VulkanDescriptorSetLayout>>,
     pub(super) defunct: Cell<bool>,
     pub(super) pending_cpu_jobs: CopyHashMap<u64, PendingJob>,
     pub(super) shm_allocator: Rc<VulkanThreadedAllocator>,
     pub(super) samplers: StaticMap<ScalingFilter, Rc<VulkanSampler>>,
-    pub(super) blend_buffers: RefCell<BHashMap<(u32, u32), Weak<VulkanImage>>>,
+    pub(super) blend_buffers: RefCell<BHashMap<(u32, u32, bool), Weak<VulkanImage>>>,
     pub(super) shader_buffer_cache: Rc<VulkanBufferCache>,
     pub(super) uniform_buffer_cache: Rc<VulkanBufferCache>,
     pub(super) render_tls: Option<Rc<VulkanTimelineSemaphore>>,
@@ -280,11 +289,13 @@ pub(super) struct Memory {
     blend_buffer_inv_eotf_args_descriptor: Option<Box<[u8]>>,
     fb_inv_eotf_args_descriptor: Option<Box<[u8]>>,
     blend_buffer_descriptor_buffer_offset: DeviceAddress,
+    blur_buffer_descriptor_buffer_offset: DeviceAddress,
     blend_buffer_color_management_data_address: Option<DeviceSize>,
     blend_buffer_eotf_args_address: Option<DeviceSize>,
     blend_buffer_inv_eotf_args_address: Option<DeviceSize>,
     fb_inv_eotf_args_address: Option<DeviceSize>,
     blend_buffer_descriptor_heap_offset: u32,
+    blur_buffer_descriptor_heap_offset: u32,
     sampler_descriptor_buffer_offsets: StaticCopyMap<ScalingFilter, DeviceAddress>,
 }
 
@@ -293,6 +304,7 @@ type Point = [[f32; 2]; 4];
 enum VulkanOp {
     Fill(VulkanFillOp),
     Tex(VulkanTexOp),
+    Blur(Blur),
 }
 
 struct VulkanTexOp {
@@ -345,6 +357,7 @@ pub(super) struct PendingFrame {
     cmd: Cell<Option<Rc<VulkanCommandBuffer>>>,
     _fb: Rc<VulkanImage>,
     _bb: Option<Rc<VulkanImage>>,
+    _blur_buffer: Option<Rc<VulkanImage>>,
     _textures: Vec<UsedTexture>,
     wait_semaphores: Cell<Vec<Rc<VulkanSemaphore>>>,
     waiter: Cell<Option<SpawnedFuture<()>>>,
@@ -396,6 +409,8 @@ impl VulkanDevice {
         let tex_frag_shader;
         let out_vert_shader;
         let out_frag_shader;
+        let blur_vert_shader;
+        let blur_frag_shader;
         let mut tex_descriptor_set_layouts = ArrayVec::new();
         if self.uses_descriptor_memory() {
             tex_vert_shader = self.create_shader(TEX_VERT)?;
@@ -404,6 +419,8 @@ impl VulkanDevice {
             fill_frag_shader = self.create_shader(FILL_FRAG)?;
             out_vert_shader = Some(self.create_shader(OUT_VERT)?);
             out_frag_shader = Some(self.create_shader(OUT_FRAG)?);
+            blur_vert_shader = Some(self.create_shader(BLUR_VERT)?);
+            blur_frag_shader = Some(self.create_shader(BLUR_FRAG)?);
             if self.descriptor_buffer.is_some() {
                 tex_descriptor_set_layouts.push(self.create_tex_sampler_descriptor_set_layout()?);
                 tex_descriptor_set_layouts.push(self.create_tex_resource_descriptor_set_layout()?);
@@ -415,6 +432,8 @@ impl VulkanDevice {
             fill_frag_shader = self.create_shader(LEGACY_FILL_FRAG)?;
             out_vert_shader = None;
             out_frag_shader = None;
+            blur_vert_shader = None;
+            blur_frag_shader = None;
             tex_descriptor_set_layouts.push(self.create_tex_legacy_descriptor_set_layout()?);
         }
         let out_descriptor_set_layout = self
@@ -515,6 +534,8 @@ impl VulkanDevice {
             create_tex_frag_bindings(Some(0), 1, offset_of!(HeapTexPushConstants, heap_tex_set));
         let out_frag_bindings =
             create_tex_frag_bindings(None, 0, offset_of!(HeapOutPushConstants, heap_tex_set));
+        let blur_frag_bindings =
+            create_blur_frag_bindings(offset_of!(HeapBlurPushConstants, heap_tex_set));
         if descriptor_heap.is_some() {
             log::info!("Using descriptor heaps");
         } else if descriptor_buffer.is_some() {
@@ -530,6 +551,8 @@ impl VulkanDevice {
             tex_frag_bindings,
             out_pipelines: Default::default(),
             out_frag_bindings,
+            blur_frag_bindings,
+            blur_pipeline: Default::default(),
             gfx_command_buffers,
             transfer_command_buffers,
             wait_semaphores: Default::default(),
@@ -547,6 +570,8 @@ impl VulkanDevice {
             tex_frag_shader,
             out_vert_shader,
             out_frag_shader,
+            blur_vert_shader,
+            blur_frag_shader,
             tex_descriptor_set_layouts,
             out_descriptor_set_layout,
             defunct: Cell::new(false),
@@ -561,6 +586,9 @@ impl VulkanDevice {
             descriptor_buffer,
             descriptor_heap,
         });
+        if self.uses_descriptor_memory() {
+            render.get_or_create_blur_pipeline()?;
+        }
         Ok(render)
     }
 }
@@ -723,6 +751,40 @@ impl VulkanRenderer {
         Ok(out)
     }
 
+    fn get_or_create_blur_pipeline(&self) -> Result<Rc<VulkanPipeline>, VulkanError> {
+        if let Some(pipeline) = self.blur_pipeline.get() {
+            return Ok(pipeline);
+        }
+        let mut descriptor_set_layouts = ArrayVec::new();
+        descriptor_set_layouts.extend(self.out_descriptor_set_layout.clone());
+        let pipeline = self.device.create_pipeline2(
+            PipelineCreateInfo {
+                format: crate::gfx_apis::vulkan::format::BLEND_FORMAT.vk_format,
+                vert: self
+                    .blur_vert_shader
+                    .clone()
+                    .expect("blur support requires a vertex shader"),
+                frag: self
+                    .blur_frag_shader
+                    .clone()
+                    .expect("blur support requires a fragment shader"),
+                blend: false,
+                src_has_alpha: true,
+                has_alpha_mult: false,
+                alpha_mode: AlphaMode::PremultipliedElectrical,
+                eotf: EOTF_LINEAR,
+                inv_eotf: EOTF_LINEAR,
+                descriptor_set_layouts,
+                has_color_management_data: false,
+                frag_descriptor_mappings: &self.blur_frag_bindings,
+                grayscale: false,
+            },
+            size_of::<BlurPushConstants>(),
+        )?;
+        self.blur_pipeline.set(Some(pipeline.clone()));
+        Ok(pipeline)
+    }
+
     pub(super) fn allocate_point(&self) -> u64 {
         self.last_point.fetch_add(1) + 1
     }
@@ -731,6 +793,7 @@ impl VulkanRenderer {
         &self,
         buf: CommandBuffer,
         bb: Option<&VulkanImage>,
+        blur_buffer: Option<&VulkanImage>,
     ) -> Result<(), VulkanError> {
         let Some(db) = &self.descriptor_buffer else {
             return Ok(());
@@ -797,7 +860,10 @@ impl VulkanRenderer {
             ));
         }
         if let Some(bb) = bb {
-            let layout = self.out_descriptor_set_layout.as_ref().unwrap();
+            let layout = self
+                .out_descriptor_set_layout
+                .as_ref()
+                .expect("descriptor-buffer rendering requires an output layout");
             memory.blend_buffer_descriptor_buffer_offset = resource_writer.next_offset();
             let mut writer = resource_writer.add_set(layout);
             writer.write(layout.offsets[0], bb.db_sampled_image_descriptor().unwrap());
@@ -813,6 +879,20 @@ impl VulkanRenderer {
             if let Some(desc) = fb_inv_eotf_args_descriptor {
                 writer.write(layout.offsets[3], desc);
             }
+        }
+        if let Some(blur_buffer) = blur_buffer {
+            let layout = self
+                .out_descriptor_set_layout
+                .as_ref()
+                .expect("descriptor-buffer rendering requires an output layout");
+            memory.blur_buffer_descriptor_buffer_offset = resource_writer.next_offset();
+            let mut writer = resource_writer.add_set(layout);
+            writer.write(
+                layout.offsets[0],
+                blur_buffer
+                    .db_sampled_image_descriptor()
+                    .expect("background blur requires an intermediate sampled-image descriptor"),
+            );
         }
         let tex_descriptor_set_layout = &self.tex_descriptor_set_layouts[1];
         for pass in RenderPass::variants() {
@@ -903,6 +983,7 @@ impl VulkanRenderer {
                             color: f.color.map(|c| c.to_bits()),
                         },
                         VulkanOp::Tex(t) => Key::Tex(t.index),
+                        VulkanOp::Blur(_) => unreachable!(),
                     }
                 });
                 let mops = &mut memory.ops[pass];
@@ -927,6 +1008,7 @@ impl VulkanRenderer {
                             }
                             mops.push(VulkanOp::Fill(f));
                         }
+                        VulkanOp::Blur(_) => unreachable!(),
                         VulkanOp::Tex(mut c) => {
                             c.range_address = memory.data_buffer.len() as DeviceAddress;
                             c.instances = c.range.len() as u32;
@@ -993,6 +1075,10 @@ impl VulkanRenderer {
                             instances: 0,
                         }));
                     }
+                }
+                GfxApiOp::Blur(blur) => {
+                    sync(memory);
+                    memory.ops[RenderPass::BlendBuffer].push(VulkanOp::Blur(blur.clone()));
                 }
                 GfxApiOp::CopyTexture(ct) => {
                     let tex = ct.tex.clone().into_vk(&self.device.device)?;
@@ -1177,6 +1263,7 @@ impl VulkanRenderer {
                     VulkanOp::Tex(c) => {
                         c.range_address += buffer.buffer.address;
                     }
+                    VulkanOp::Blur(_) => {}
                 }
             }
         }
@@ -1463,6 +1550,37 @@ impl VulkanRenderer {
         }
     }
 
+    fn begin_rendering_with_load(
+        &self,
+        buf: CommandBuffer,
+        target: &VulkanImage,
+        load_op: AttachmentLoadOp,
+    ) {
+        let attachment = RenderingAttachmentInfo::default()
+            .image_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image_view(
+                target
+                    .render_view
+                    .or(target.texture_view)
+                    .expect("verified render target has an image view"),
+            )
+            .load_op(load_op)
+            .store_op(AttachmentStoreOp::STORE);
+        let rendering_info = RenderingInfo::default()
+            .render_area(Rect2D {
+                offset: Default::default(),
+                extent: Extent2D {
+                    width: target.width,
+                    height: target.height,
+                },
+            })
+            .layer_count(1)
+            .color_attachments(slice::from_ref(&attachment));
+        unsafe {
+            self.device.device.cmd_begin_rendering(buf, &rendering_info);
+        }
+    }
+
     fn set_viewport(&self, buf: CommandBuffer, fb: &VulkanImage) {
         zone!("set_viewport");
         let viewport = Viewport {
@@ -1496,6 +1614,7 @@ impl VulkanRenderer {
         target: &VulkanImage,
         pass: RenderPass,
         target_cd: &ColorDescription,
+        range: Range<usize>,
     ) -> Result<(), VulkanError> {
         zone!("record_draws");
         let memory = &*self.memory.borrow();
@@ -1517,8 +1636,9 @@ impl VulkanRenderer {
                 .unwrap_or_default(),
             RenderPass::FrameBuffer => memory.fb_inv_eotf_args_address.unwrap_or_default(),
         };
-        for opt in &memory.ops[pass] {
+        for opt in &memory.ops[pass][range] {
             match opt {
+                VulkanOp::Blur(_) => unreachable!(),
                 VulkanOp::Fill(r) => {
                     let pipeline = &fill_pl[r.source_type];
                     bind(pipeline);
@@ -1667,6 +1787,173 @@ impl VulkanRenderer {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn record_blur_draw(
+        &self,
+        buf: CommandBuffer,
+        blur: &Blur,
+        direction: [i32; 2],
+        source_is_blur_buffer: bool,
+        region: &Region,
+    ) -> Result<(), VulkanError> {
+        let pipeline = self.get_or_create_blur_pipeline()?;
+        let memory = &*self.memory.borrow();
+        let push = BlurPushConstants {
+            direction,
+            radius: blur.kernel.radius,
+            sigma: blur.kernel.sigma,
+            normalization: blur.kernel.normalization,
+        };
+        let dev = &self.device.device;
+        unsafe {
+            dev.cmd_bind_pipeline(buf, PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+            if let Some(dh) = &self.descriptor_heap {
+                let push = HeapBlurPushConstants {
+                    push,
+                    heap_tex_set: HeapTexSet {
+                        sampler_descriptor_offset: dh.samplers[ScalingFilter::Nearest].offset(),
+                        tex_descriptor_offset: match source_is_blur_buffer {
+                            true => memory.blur_buffer_descriptor_heap_offset,
+                            false => memory.blend_buffer_descriptor_heap_offset,
+                        },
+                        color_management_data_addr: 0,
+                        eotf_args_addr: 0,
+                        inv_eotf_args_addr: 0,
+                    },
+                };
+                dh.device.push_data(buf, &push);
+            } else if let Some(db) = &self.device.descriptor_buffer {
+                let offset = match source_is_blur_buffer {
+                    true => memory.blur_buffer_descriptor_buffer_offset,
+                    false => memory.blend_buffer_descriptor_buffer_offset,
+                };
+                db.device.cmd_set_descriptor_buffer_offsets(
+                    buf,
+                    PipelineBindPoint::GRAPHICS,
+                    pipeline.pipeline_layout,
+                    0,
+                    &[1],
+                    &[offset],
+                );
+                dev.cmd_push_constants(
+                    buf,
+                    pipeline.pipeline_layout,
+                    ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT,
+                    0,
+                    uapi::as_bytes(&push),
+                );
+            } else {
+                unreachable!();
+            }
+            for rect in region.rects() {
+                let scissor = Rect2D {
+                    offset: Offset2D {
+                        x: rect.x1(),
+                        y: rect.y1(),
+                    },
+                    extent: Extent2D {
+                        width: rect.width() as u32,
+                        height: rect.height() as u32,
+                    },
+                };
+                dev.cmd_set_scissor(buf, 0, slice::from_ref(&scissor));
+                dev.cmd_draw(buf, 4, 1, 0, 0);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_ordered_blur_pass(
+        &self,
+        buf: CommandBuffer,
+        bb: &VulkanImage,
+        blur_buffer: &VulkanImage,
+        clear: Option<&Color>,
+        clear_cd: &LinearColorDescription,
+        bb_cd: &ColorDescription,
+    ) -> Result<(), VulkanError> {
+        self.begin_rendering(buf, bb, clear, clear_cd, RenderPass::BlendBuffer, bb_cd);
+        let blurs: Vec<_> = self.memory.borrow().ops[RenderPass::BlendBuffer]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                VulkanOp::Blur(blur) => Some((index, blur.clone())),
+                _ => None,
+            })
+            .collect();
+        let mut start = 0;
+        let mut blur_buffer_undefined = blur_buffer.is_undefined.get();
+        for (index, blur) in blurs {
+            self.record_draws(buf, bb, RenderPass::BlendBuffer, bb_cd, start..index)?;
+            self.end_rendering(buf);
+            let blur_buffer_old_layout = match blur_buffer_undefined {
+                true => ImageLayout::UNDEFINED,
+                false => ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            let mut blur_buffer_barrier = image_barrier()
+                .image(blur_buffer.image)
+                .old_layout(blur_buffer_old_layout)
+                .new_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .dst_stage_mask(PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(AccessFlags2::COLOR_ATTACHMENT_WRITE);
+            if !blur_buffer_undefined {
+                blur_buffer_barrier = blur_buffer_barrier
+                    .src_stage_mask(PipelineStageFlags2::FRAGMENT_SHADER)
+                    .src_access_mask(AccessFlags2::SHADER_SAMPLED_READ);
+            }
+            let barriers = [
+                image_barrier()
+                    .image(bb.image)
+                    .old_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_stage_mask(PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(AccessFlags2::SHADER_SAMPLED_READ),
+                blur_buffer_barrier,
+            ];
+            let dependency = DependencyInfoKHR::default().image_memory_barriers(&barriers);
+            unsafe {
+                self.device.device.cmd_pipeline_barrier2(buf, &dependency);
+            }
+            blur_buffer_undefined = false;
+            self.begin_rendering_with_load(buf, blur_buffer, AttachmentLoadOp::DONT_CARE);
+            self.record_blur_draw(buf, &blur, [1, 0], false, &blur.horizontal_region)?;
+            self.end_rendering(buf);
+            let barriers = [
+                image_barrier()
+                    .image(blur_buffer.image)
+                    .old_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_stage_mask(PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(AccessFlags2::SHADER_SAMPLED_READ),
+                image_barrier()
+                    .image(bb.image)
+                    .old_layout(ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_stage_mask(PipelineStageFlags2::FRAGMENT_SHADER)
+                    .src_access_mask(AccessFlags2::SHADER_SAMPLED_READ)
+                    .dst_stage_mask(PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(
+                        AccessFlags2::COLOR_ATTACHMENT_READ | AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    ),
+            ];
+            let dependency = DependencyInfoKHR::default().image_memory_barriers(&barriers);
+            unsafe {
+                self.device.device.cmd_pipeline_barrier2(buf, &dependency);
+            }
+            self.begin_rendering_with_load(buf, bb, AttachmentLoadOp::LOAD);
+            self.record_blur_draw(buf, &blur, [0, 1], true, &blur.paint_region)?;
+            self.set_viewport(buf, bb);
+            start = index + 1;
+        }
+        let len = self.memory.borrow().ops[RenderPass::BlendBuffer].len();
+        self.record_draws(buf, bb, RenderPass::BlendBuffer, bb_cd, start..len)?;
+        self.end_rendering(buf);
         Ok(())
     }
 
@@ -2089,9 +2376,17 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn store_layouts(&self, fb: &VulkanImage, bb: Option<&VulkanImage>) {
+    fn store_layouts(
+        &self,
+        fb: &VulkanImage,
+        bb: Option<&VulkanImage>,
+        blur_buffer: Option<&VulkanImage>,
+    ) {
         if let Some(bb) = bb {
             bb.is_undefined.set(false);
+        }
+        if let Some(blur_buffer) = blur_buffer {
+            blur_buffer.is_undefined.set(false);
         }
         fb.is_undefined.set(false);
         fb.contents_are_undefined.set(false);
@@ -2111,6 +2406,7 @@ impl VulkanRenderer {
         buf: Rc<VulkanCommandBuffer>,
         fb: &Rc<VulkanImage>,
         bb: Option<Rc<VulkanImage>>,
+        blur_buffer: Option<Rc<VulkanImage>>,
     ) {
         zone!("create_pending_frame");
         let point = self.allocate_point();
@@ -2121,6 +2417,7 @@ impl VulkanRenderer {
             cmd: Cell::new(Some(buf)),
             _fb: fb.clone(),
             _bb: bb,
+            _blur_buffer: blur_buffer,
             _textures: mem::take(&mut memory.textures),
             wait_semaphores: Cell::new(mem::take(&mut memory.wait_semaphores)),
             waiter: Cell::new(None),
@@ -2196,6 +2493,46 @@ impl VulkanRenderer {
         Ok(semaphore)
     }
 
+    fn create_blur_regions(&self, fb: &VulkanImage, clear: Option<&Color>, region: &Region) {
+        let memory = &mut *self.memory.borrow_mut();
+        for pass in RenderPass::variants() {
+            memory.paint_regions[pass].clear();
+            memory.paint_bounds[pass] = None;
+            memory.clear_rects[pass].clear();
+        }
+        let to_fb = |coordinate: i32, max: u32| 2.0 * (coordinate as f32 / max as f32) - 1.0;
+        for rect in region.rects() {
+            let Some([x1, y1, x2, y2]) = constrain_to_fb(fb, rect) else {
+                continue;
+            };
+            let paint = PaintRegion {
+                x1: to_fb(x1, fb.width),
+                x2: to_fb(x2, fb.width),
+                y1: to_fb(y1, fb.height),
+                y2: to_fb(y2, fb.height),
+            };
+            memory.paint_regions[RenderPass::BlendBuffer].push(paint);
+            memory.paint_bounds[RenderPass::BlendBuffer] =
+                Some(match memory.paint_bounds[RenderPass::BlendBuffer] {
+                    Some(bounds) => bounds.union(&paint),
+                    None => paint,
+                });
+            if clear.is_some() {
+                memory.clear_rects[RenderPass::BlendBuffer].push(ClearRect {
+                    rect: Rect2D {
+                        offset: Offset2D { x: x1, y: y1 },
+                        extent: Extent2D {
+                            width: (x2 - x1) as u32,
+                            height: (y2 - y1) as u32,
+                        },
+                    },
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            }
+        }
+    }
+
     fn create_regions(
         &self,
         fb: &VulkanImage,
@@ -2215,6 +2552,7 @@ impl VulkanRenderer {
             let (opaque, fb_rect) = match op {
                 GfxApiOp::Sync => continue,
                 GfxApiOp::FillRect(f) => (f.effective_color().is_opaque(), f.rect),
+                GfxApiOp::Blur(_) => continue,
                 GfxApiOp::CopyTexture(c) => {
                     let opaque = 'opaque: {
                         if let Some(a) = c.alpha
@@ -2361,7 +2699,11 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn ensure_descriptor_heap_entries(&self, bb: Option<&VulkanImage>) -> Result<(), VulkanError> {
+    fn ensure_descriptor_heap_entries(
+        &self,
+        bb: Option<&VulkanImage>,
+        blur_buffer: Option<&VulkanImage>,
+    ) -> Result<(), VulkanError> {
         let Some(dh) = &self.descriptor_heap else {
             return Ok(());
         };
@@ -2412,6 +2754,12 @@ impl VulkanRenderer {
                 };
                 memory.blend_buffer_descriptor_heap_offset = offset;
             }
+            if let Some(blur_buffer) = blur_buffer {
+                let Some(offset) = handle_tex(blur_buffer)? else {
+                    continue 'retry;
+                };
+                memory.blur_buffer_descriptor_heap_offset = offset;
+            }
             for op in memory.ops.values_mut().flatten() {
                 let VulkanOp::Tex(c) = op else {
                     continue;
@@ -2441,36 +2789,69 @@ impl VulkanRenderer {
         sync: &[FdSync],
     ) -> Result<(), VulkanError> {
         self.check_defunct()?;
-        self.elide_blend_buffer1(&mut blend_buffer, bb_cd, fb_cd);
-        self.create_regions(fb, ops, clear, region, blend_buffer.as_deref())?;
-        self.elide_blend_buffer2(&mut blend_buffer);
+        let has_blur = ops
+            .iter()
+            .any(|op| matches!(op, GfxApiOp::Blur(blur) if !blur.sample_region.is_empty()));
+        let full_region;
+        let region = if has_blur {
+            full_region = Region::new(Rect::new_sized_saturating(
+                0,
+                0,
+                fb.width as i32,
+                fb.height as i32,
+            ));
+            &full_region
+        } else {
+            region
+        };
+        let blur_buffer = if has_blur {
+            if blend_buffer.is_none() {
+                blend_buffer = Some(self.acquire_blend_buffer(fb.width as i32, fb.height as i32)?);
+            }
+            self.create_blur_regions(fb, clear, region);
+            Some(self.acquire_blur_buffer(fb.width as i32, fb.height as i32)?)
+        } else {
+            self.elide_blend_buffer1(&mut blend_buffer, bb_cd, fb_cd);
+            self.create_regions(fb, ops, clear, region, blend_buffer.as_deref())?;
+            self.elide_blend_buffer2(&mut blend_buffer);
+            None
+        };
         let bb = blend_buffer.as_deref();
         self.verify_render_targets(fb, bb)?;
+        if let Some(blur_buffer) = &blur_buffer {
+            self.verify_render_targets(blur_buffer, None)?;
+        }
         let buf = self.gfx_command_buffers.allocate()?;
         self.convert_ops(ops, bb_cd, fb_cd)?;
-        self.ensure_descriptor_heap_entries(bb)?;
+        self.ensure_descriptor_heap_entries(bb, blur_buffer.as_deref())?;
         self.create_fixed_cm_data(bb, bb_cd, fb_cd);
         self.create_data_buffer()?;
         self.create_uniform_buffer()?;
         self.collect_memory();
         self.begin_command_buffer(buf.buffer)?;
-        self.create_descriptor_buffers(buf.buffer, bb)?;
+        self.create_descriptor_buffers(buf.buffer, bb, blur_buffer.as_deref())?;
         self.initial_barriers(buf.buffer, fb)?;
         self.set_viewport(buf.buffer, fb);
         if let Some(bb) = bb {
             zone!("blend buffer pass");
             let rp = RenderPass::BlendBuffer;
             self.blend_buffer_initial_barrier(buf.buffer, bb);
-            self.begin_rendering(buf.buffer, bb, clear, clear_cd, rp, bb_cd);
-            self.record_draws(buf.buffer, bb, rp, bb_cd)?;
-            self.end_rendering(buf.buffer);
+            if let Some(blur_buffer) = &blur_buffer {
+                self.record_ordered_blur_pass(buf.buffer, bb, blur_buffer, clear, clear_cd, bb_cd)?;
+            } else {
+                self.begin_rendering(buf.buffer, bb, clear, clear_cd, rp, bb_cd);
+                let len = self.memory.borrow().ops[rp].len();
+                self.record_draws(buf.buffer, bb, rp, bb_cd, 0..len)?;
+                self.end_rendering(buf.buffer);
+            }
             self.blend_buffer_final_barrier(buf.buffer, bb);
         }
         {
             zone!("frame buffer pass");
             let rp = RenderPass::FrameBuffer;
             self.begin_rendering(buf.buffer, fb, clear, clear_cd, rp, fb_cd);
-            self.record_draws(buf.buffer, fb, rp, fb_cd)?;
+            let len = self.memory.borrow().ops[rp].len();
+            self.record_draws(buf.buffer, fb, rp, fb_cd, 0..len)?;
             if bb.is_some() {
                 self.blend_buffer_copy(buf.buffer, fb, fb_cd, bb_cd)?;
             }
@@ -2482,8 +2863,8 @@ impl VulkanRenderer {
         self.create_wait_semaphores(fb, &fb_acquire_sync, sync)?;
         self.submit(buf.buffer)?;
         self.import_release_semaphore(fb, fb_release_sync);
-        self.store_layouts(fb, bb);
-        self.create_pending_frame(buf, fb, blend_buffer);
+        self.store_layouts(fb, bb, blur_buffer.as_deref());
+        self.create_pending_frame(buf, fb, blend_buffer, blur_buffer);
         Ok(())
     }
 
@@ -2857,6 +3238,27 @@ impl EotfArgsCache {
 }
 
 type FragBindings = ArrayVec<DescriptorSetAndBindingMappingEXT<'static>, 5>;
+
+fn create_blur_frag_bindings(offset: usize) -> FragBindings {
+    let mut mappings = ArrayVec::new();
+    mappings.push(
+        DescriptorSetAndBindingMappingEXT::default()
+            .descriptor_set(0)
+            .first_binding(0)
+            .binding_count(1)
+            .resource_mask(SpirvResourceTypeFlagsEXT::SAMPLED_IMAGE)
+            .source(DescriptorMappingSourceEXT::HEAP_WITH_PUSH_INDEX)
+            .source_data(DescriptorMappingSourceDataEXT {
+                push_index: DescriptorMappingSourcePushIndexEXT::default()
+                    .heap_offset(0)
+                    .push_offset(
+                        offset as u32 + offset_of!(HeapTexSet, tex_descriptor_offset) as u32,
+                    )
+                    .heap_index_stride(1),
+            }),
+    );
+    mappings
+}
 
 fn create_tex_frag_bindings(sampler_set: Option<u32>, tex_set: u32, offset: usize) -> FragBindings {
     let offset = offset as u32;

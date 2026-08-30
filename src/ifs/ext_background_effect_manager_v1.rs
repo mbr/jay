@@ -55,13 +55,7 @@ impl ExtBackgroundEffectManagerV1Global {
 
 impl ExtBackgroundEffectManagerV1 {
     pub fn send_capabilities(&self) {
-        let flags = match self
-            .client
-            .state
-            .render_ctx
-            .get()
-            .is_some_and(|ctx| ctx.supports_background_blur())
-        {
+        let flags = match self.client.state.background_blur_supported() {
             true => CAPABILITY_BLUR,
             false => 0,
         };

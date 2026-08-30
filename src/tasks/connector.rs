@@ -206,7 +206,10 @@ impl ConnectorHandler {
         });
         self.state.outputs.set(self.id, output_data.clone());
         on.schedule_update_render_data();
+        let had_background_blur = self.state.background_blur_supported();
         self.state.root.outputs.set(self.id, on.clone());
+        self.state
+            .update_background_blur_capabilities(had_background_blur);
         self.state.outputs_without_hc.fetch_add(1);
         self.state.output_extents_changed();
         global.opt.node.set(Some(on.clone()));
@@ -301,7 +304,10 @@ impl ConnectorHandler {
         if on.hardware_cursor.is_none() {
             self.state.outputs_without_hc.fetch_sub(1);
         }
+        let had_background_blur = self.state.background_blur_supported();
         self.state.root.outputs.remove(&self.id);
+        self.state
+            .update_background_blur_capabilities(had_background_blur);
         self.state.output_extents_changed();
         self.state.outputs.remove(&self.id);
         ons.lock_surface.take();

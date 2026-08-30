@@ -230,6 +230,10 @@ fn run_ops(fb: &Framebuffer, ops: &[GfxApiOp]) -> Option<FdSync> {
                     copy_tex.push(c);
                     i += 1;
                 }
+                GfxApiOp::Blur(_) => {
+                    log::error!("OpenGL received an unsupported background blur operation");
+                    i += 1;
+                }
             }
         }
         if fill_rect.is_not_empty() {

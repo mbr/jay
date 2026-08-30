@@ -30,6 +30,7 @@ use crate::gfx_api::BufferResv;
 use crate::gfx_api::DirectScanoutError;
 use crate::gfx_api::DirectScanoutPosition;
 use crate::gfx_api::FdSync;
+use crate::gfx_api::GFX_HAS_BACKGROUND_BLUR;
 use crate::gfx_api::GfxBlendBuffer;
 use crate::gfx_api::GfxContext;
 use crate::gfx_api::GfxError;
@@ -46,6 +47,7 @@ use crate::ifs::wp_presentation_feedback::KIND_HW_CLOCK;
 use crate::ifs::wp_presentation_feedback::KIND_HW_COMPLETION;
 use crate::ifs::wp_presentation_feedback::KIND_VSYNC;
 use crate::ifs::wp_presentation_feedback::KIND_ZERO_COPY;
+use crate::rect::Rect;
 use crate::rect::Region;
 use crate::state::State;
 use crate::tasks::handle_connector;
@@ -618,16 +620,11 @@ impl VirtualOutput {
         if damage_count == 0 {
             return None;
         }
-        let damage = {
-            on.global.connector.damaged.set(false);
-            on.add_visualizer_damage();
-            let damage = &mut *on.global.connector.damage.borrow_mut();
-            let region = Region::from_rects2(damage);
-            damage.clear();
-            region
-        };
+        on.global.connector.damaged.set(false);
+        on.add_visualizer_damage();
+        let mode = on.global.mode.get();
         let pass = create_render_pass(
-            on.global.mode.get().size(),
+            mode.size(),
             &**on,
             &self.state,
             Some(on.node_state[RenderTL].pos.get()),
@@ -641,6 +638,16 @@ impl VirtualOutput {
             Some(&self.state.damage_visualizer),
             true,
         );
+        let damage = {
+            let damage = &mut *on.global.connector.damage.borrow_mut();
+            if pass.flags.intersects(GFX_HAS_BACKGROUND_BLUR) {
+                damage.clear();
+                damage.push(Rect::new_sized_saturating(0, 0, mode.width, mode.height));
+            }
+            let region = Region::from_rects2(damage);
+            damage.clear();
+            region
+        };
         Some(Latched {
             pass,
             damage_count,

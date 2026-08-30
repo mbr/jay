@@ -1,6 +1,10 @@
 use crate::cmm::cmm_render_intent::RenderIntent;
 use crate::gfx_api::AcquireSync;
+use crate::gfx_api::Blur;
+use crate::gfx_api::BlurKernel;
 use crate::gfx_api::BufferResv;
+use crate::gfx_api::FramebufferRect;
+use crate::gfx_api::GFX_HAS_BACKGROUND_BLUR;
 use crate::gfx_api::GfxApiOp;
 use crate::gfx_api::GfxTexture;
 use crate::gfx_api::LazyTexture;
@@ -17,6 +21,7 @@ use crate::ifs::wl_surface::xdg_surface::xdg_toplevel::XdgToplevel;
 use crate::ifs::wl_surface::xdg_surface::xdg_toplevel::xdg_toplevel_icon_v1::ToplevelIcon;
 use crate::ifs::wl_surface::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
 use crate::rect::Rect;
+use crate::rect::Region;
 use crate::renderer::renderer_base::RenderTexture;
 use crate::renderer::renderer_base::RendererBase;
 use crate::scale::Scale;
@@ -47,6 +52,54 @@ pub struct Renderer<'a> {
     pub pixel_extents: Rect,
     pub title_icons: Option<Rc<SizedTitleIcons>>,
     pub bar_icons: Option<Rc<SizedBarIcons>>,
+    pub blur_kernel: Option<Rc<BlurKernel>>,
+}
+
+pub fn create_blur_kernel(scale: Scale) -> Rc<BlurKernel> {
+    const SIGMA: f64 = 8.0;
+    const TRUNCATION: f64 = 3.0;
+
+    let sigma = SIGMA * scale.to_f64();
+    let radius = (sigma * TRUNCATION).ceil() as i32;
+    let mut sum = 0.0;
+    for offset in 0..=radius {
+        let offset = offset as f64;
+        let weight = (-offset * offset / (2.0 * sigma * sigma)).exp() as f32;
+        sum += match offset == 0.0 {
+            true => weight,
+            false => 2.0 * weight,
+        };
+    }
+    Rc::new(BlurKernel {
+        radius,
+        sigma: sigma as f32,
+        normalization: sum.recip(),
+    })
+}
+
+fn div_ceil(value: i32, divisor: i32) -> i32 {
+    let quotient = value.div_euclid(divisor);
+    match value.rem_euclid(divisor) {
+        0 => quotient,
+        _ => quotient.saturating_add(1),
+    }
+}
+
+fn expand_region(region: &Region, x: i32, y: i32, bounds: Rect) -> Rc<Region> {
+    let mut rects = Vec::with_capacity(region.rects().len());
+    for rect in region.rects() {
+        let rect = Rect::new_saturating(
+            rect.x1().saturating_sub(x),
+            rect.y1().saturating_sub(y),
+            rect.x2().saturating_add(x),
+            rect.y2().saturating_add(y),
+        )
+        .intersect(bounds);
+        if !rect.is_empty() {
+            rects.push(rect);
+        }
+    }
+    Region::from_rects(&rects)
 }
 
 impl Renderer<'_> {
@@ -549,11 +602,78 @@ impl Renderer<'_> {
                 };
             }
             render!(&children.below);
+            self.render_background_blur(surface, x, y, size, bounds);
             self.render_buffer(surface, x, y, *tpoints, size, bounds);
             render!(&children.above);
         } else {
+            self.render_background_blur(surface, x, y, size, bounds);
             self.render_buffer(surface, x, y, *tpoints, size, bounds);
         }
+    }
+
+    fn render_background_blur(
+        &mut self,
+        surface: &WlSurface,
+        x: i32,
+        y: i32,
+        size: (i32, i32),
+        bounds: Option<&Rect>,
+    ) {
+        let Some(kernel) = &self.blur_kernel else {
+            return;
+        };
+        let Some(region) = surface.blur_region.get() else {
+            return;
+        };
+        let wire_scale = surface.client.wire_scale.get().unwrap_or(1);
+        let surface_bounds = Rect::new_sized_saturating(x, y, size.0, size.1);
+        let output_bounds =
+            Rect::new_sized_saturating(0, 0, self.base.fb_width as i32, self.base.fb_height as i32);
+        let mut rects = vec![];
+        for rect in region.rects() {
+            let rect = Rect::new_saturating(
+                rect.x1().div_euclid(wire_scale),
+                rect.y1().div_euclid(wire_scale),
+                div_ceil(rect.x2(), wire_scale),
+                div_ceil(rect.y2(), wire_scale),
+            );
+            let rect = self.base.scale_rect(rect).move_(x, y);
+            let rect = rect.intersect(surface_bounds);
+            let rect = match bounds {
+                Some(bounds) => rect.intersect(*bounds),
+                None => rect,
+            };
+            if rect.is_empty() {
+                continue;
+            }
+            let rect = FramebufferRect::new(
+                rect.x1() as f32,
+                rect.y1() as f32,
+                rect.x2() as f32,
+                rect.y2() as f32,
+                self.base.transform,
+                self.base.fb_width,
+                self.base.fb_height,
+            )
+            .to_rect(self.base.fb_width, self.base.fb_height)
+            .intersect(output_bounds);
+            if !rect.is_empty() {
+                rects.push(rect);
+            }
+        }
+        let paint_region = Region::from_rects(&rects);
+        if paint_region.is_empty() {
+            return;
+        }
+        let horizontal_region = expand_region(&paint_region, 0, kernel.radius, output_bounds);
+        let sample_region = expand_region(&horizontal_region, kernel.radius, 0, output_bounds);
+        self.base.flags |= GFX_HAS_BACKGROUND_BLUR;
+        self.base.ops.push(GfxApiOp::Blur(Blur {
+            paint_region,
+            sample_region,
+            horizontal_region,
+            kernel: kernel.clone(),
+        }));
     }
 
     pub fn render_buffer(

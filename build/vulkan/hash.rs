@@ -21,6 +21,8 @@ pub const TREES: &[Tree] = &[
             "tex.frag",
             "out.vert",
             "out.frag",
+            "blur.vert",
+            "blur.frag",
             "legacy/fill.frag",
             "legacy/fill.vert",
             "legacy/tex.vert",
