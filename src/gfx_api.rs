@@ -1059,6 +1059,10 @@ pub trait GfxContext: Debug {
         false
     }
 
+    fn supports_background_blur(&self) -> bool {
+        false
+    }
+
     fn supports_invalid_modifier(&self) -> bool {
         false
     }

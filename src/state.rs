@@ -91,6 +91,7 @@ use crate::globals::GlobalsError;
 use crate::globals::RemovableWaylandGlobal;
 use crate::globals::WaylandGlobal;
 use crate::icons::Icons;
+use crate::ifs::ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1;
 use crate::ifs::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1;
 use crate::ifs::ext_idle_notification_v1::ExtIdleNotificationV1;
 use crate::ifs::ext_session_lock_v1::ExtSessionLockV1;
@@ -239,6 +240,7 @@ use crate::video::drm::Drm;
 use crate::video::drm::NodeType;
 use crate::virtual_output::VirtualOutputs;
 use crate::wheel::Wheel;
+use crate::wire::ExtBackgroundEffectManagerV1Id;
 use crate::wire::ExtForeignToplevelListV1Id;
 use crate::wire::ExtIdleNotificationV1Id;
 use crate::wire::JayRenderCtxId;
@@ -344,6 +346,8 @@ pub struct State {
     pub hardware_tick_cursor: AsyncQueue<Option<Rc<dyn Cursor>>>,
     pub testers: RefCell<BHashMap<(ClientId, JaySeatEventsId), Rc<JaySeatEvents>>>,
     pub render_ctx_watchers: CopyHashMap<(ClientId, JayRenderCtxId), Rc<JayRenderCtx>>,
+    pub background_effect_managers:
+        CopyHashMap<(ClientId, ExtBackgroundEffectManagerV1Id), Rc<ExtBackgroundEffectManagerV1>>,
     pub workspace_watchers: CopyHashMap<(ClientId, JayWorkspaceWatcherId), Rc<JayWorkspaceWatcher>>,
     pub default_workspace_capture: Cell<bool>,
     pub default_gfx_api: Cell<GfxApi>,
@@ -868,6 +872,13 @@ impl State {
     }
 
     pub fn set_render_ctx(&self, ctx: Option<Rc<dyn GfxContext>>) {
+        let had_background_blur = self
+            .render_ctx
+            .get()
+            .is_some_and(|ctx| ctx.supports_background_blur());
+        let has_background_blur = ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.supports_background_blur());
         self.egg_state.clear();
         self.explicit_sync_supported.set(false);
         self.render_ctx.set(ctx.clone());
@@ -963,6 +974,18 @@ impl State {
 
         for watcher in self.render_ctx_watchers.lock().values() {
             watcher.send_render_ctx(ctx.clone());
+        }
+        if had_background_blur != has_background_blur {
+            for manager in self.background_effect_managers.lock().values() {
+                manager.send_capabilities();
+            }
+            for client in self.clients.clients.borrow().values() {
+                for surface in client.data.objects.surfaces.lock().values() {
+                    if surface.blur_region.is_some() {
+                        self.damage(surface.buffer_abs_pos[RenderTL].get());
+                    }
+                }
+            }
         }
 
         let mut scs = vec![];

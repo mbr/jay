@@ -393,6 +393,7 @@ fn start_compositor2(
         hardware_tick_cursor: Default::default(),
         testers: Default::default(),
         render_ctx_watchers: Default::default(),
+        background_effect_managers: Default::default(),
         workspace_watchers: Default::default(),
         default_workspace_capture: Cell::new(true),
         default_gfx_api: Cell::new(GfxApi::Vulkan),

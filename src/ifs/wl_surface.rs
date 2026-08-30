@@ -1,6 +1,7 @@
 pub mod commit_timeline;
 pub mod cursor;
 pub mod dnd_icon;
+pub mod ext_background_effect_surface_v1;
 pub mod ext_session_lock_surface_v1;
 pub mod jay_sync_file_release;
 pub mod jay_sync_file_surface;
@@ -393,6 +394,9 @@ pub struct WlSurface {
     destroyed: Cell<bool>,
     commit_timeline: CommitTimeline,
     alpha_modifier: CloneCell<Option<Rc<WpAlphaModifierSurfaceV1>>>,
+    pub background_effect:
+        CloneCell<Option<Rc<ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>>>,
+    pub blur_region: CloneCell<Option<Rc<Region>>>,
     alpha: Cell<Option<f32>>,
     pub text_input_connections: SmallMap<SeatId, Rc<TextInputConnection>, 1>,
     vblank_listener: EventListener<dyn VblankListener>,
@@ -586,6 +590,7 @@ struct PendingState {
     sync_file_acquire: Option<Option<SyncFile>>,
     sync_file_release: Option<SyncFileRelease>,
     alpha_multiplier: Option<Option<f32>>,
+    blur_region: Option<Option<Rc<Region>>>,
     syncobj_sync: bool,
     fifo_barrier_set: bool,
     fifo_barrier_wait: bool,
@@ -635,6 +640,7 @@ impl PendingState {
         opt!(tearing);
         opt!(content_type);
         opt!(alpha_multiplier);
+        opt!(blur_region);
         opt!(commit_time);
         opt!(color_description);
         opt!(serial);
@@ -785,6 +791,8 @@ impl WlSurface {
             destroyed: Cell::new(false),
             commit_timeline: client.commit_timelines.create_timeline(),
             alpha_modifier: Default::default(),
+            background_effect: Default::default(),
+            blur_region: Default::default(),
             alpha: Default::default(),
             text_input_connections: Default::default(),
             vblank_listener: EventListener::new(slf.clone()),
@@ -1427,6 +1435,29 @@ impl WlSurface {
         if let Some(alpha) = pending.alpha_multiplier.take() {
             alpha_changed = true;
             self.alpha.set(alpha);
+        }
+        if let Some(region) = pending.blur_region.take() {
+            let old = self.blur_region.take();
+            self.blur_region.set(region.clone());
+            let changed = match (&old, &region) {
+                (Some(old), Some(region)) => old.rects() != region.rects(),
+                (None, None) => false,
+                _ => true,
+            };
+            if changed {
+                let num_rects = old.as_deref().map_or(0, |r| r.rects().len())
+                    + region.as_deref().map_or(0, |r| r.rects().len());
+                if pending.surface_damage.len() + num_rects > MAX_DAMAGE {
+                    pending.damage_full();
+                } else {
+                    if let Some(old) = old {
+                        pending.surface_damage.extend_from_slice(old.rects());
+                    }
+                    if let Some(region) = region {
+                        pending.surface_damage.extend_from_slice(region.rects());
+                    }
+                }
+            }
         }
         let buffer_abs_pos_size = self.buffer_abs_pos[LiveTL].get().size();
         let mut max_surface_size = buffer_abs_pos_size;
@@ -2114,6 +2145,7 @@ impl Object for WlSurface {
         self.constraints.clear();
         self.commit_timeline.clear(ClearReason::BreakLoops);
         self.alpha_modifier.take();
+        self.background_effect.take();
         self.text_input_connections.clear();
         self.fifo.take();
         self.commit_timer.take();

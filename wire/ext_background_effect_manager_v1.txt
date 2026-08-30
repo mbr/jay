@@ -1,0 +1,11 @@
+request destroy (destructor) {
+}
+
+request get_background_effect {
+    id: id(ext_background_effect_surface_v1) (new),
+    surface: id(wl_surface),
+}
+
+event capabilities {
+    flags: u32,
+}

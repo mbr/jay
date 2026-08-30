@@ -1,6 +1,7 @@
 use crate::client::Client;
 use crate::client::ClientCaps;
 use crate::ifs::color_management::wp_color_manager_v1::WpColorManagerV1Global;
+use crate::ifs::ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1Global;
 use crate::ifs::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1Global;
 use crate::ifs::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1Global;
 use crate::ifs::ext_idle_notifier_v1::ExtIdleNotifierV1Global;
@@ -206,6 +207,7 @@ singletons! {
     WpContentTypeManagerV1,
     XdgActivationV1,
     ExtForeignToplevelListV1,
+    ExtBackgroundEffectManagerV1,
     ZwpIdleInhibitManagerV1,
     ExtIdleNotifierV1,
     XdgToplevelDragManagerV1,
