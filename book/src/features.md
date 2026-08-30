@@ -157,6 +157,7 @@ Jay can use either OpenGL or Vulkan for rendering. Vulkan offers better
 performance and memory usage but OpenGL is still provided for older hardware.
 
 You can change the rendering API at runtime without restarting the compositor.
+Background blur is currently available only with the Vulkan renderer.
 
 See [GPUs](configuration/gpu.md) for details.
 
@@ -251,6 +252,7 @@ granted access. See
 
 | Protocol                                             | Version | Privileged |
 |------------------------------------------------------|---------|------------|
+| ext_background_effect_manager_v1                     | 1       |            |
 | ext_data_control_manager_v1                          | 1       | Yes        |
 | ext_foreign_toplevel_image_capture_source_manager_v1 | 1       |            |
 | ext_foreign_toplevel_list_v1                         | 1       | Yes        |

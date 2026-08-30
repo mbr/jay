@@ -1,5 +1,8 @@
 # Unreleased
 
+Jay now supports `ext-background-effect-v1` background blur when using the
+Vulkan renderer.
+
 # 1.14.0 (2026-07-02)
 
 ## Fixes

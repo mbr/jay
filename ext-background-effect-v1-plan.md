@@ -37,7 +37,7 @@ Add an ordered `GfxApiOp::Blur` operation. Keep two regions distinct in the oper
 
 - The paint region `B` is the exact effect region in framebuffer coordinates.
 - The sample region `S` is `expand(B, r)` clipped to the framebuffer, where `r` is the integer physical support radius.
-- The physical kernel contains `r` and its normalized weights.
+- The physical kernel contains `r` and the parameters needed to derive normalized weights.
 
 Define blur strength in logical pixels so it has the same apparent size across output scales. Derive and cache the physical kernel for each render-pass scale, rounding its support radius outward. Carrying the kernel and both regions prevents each backend from deriving subtly different bounds or coefficients. The renderer should:
 
@@ -82,7 +82,7 @@ Use a truncated separable Gaussian with a finite, known support radius. A two-pa
 1. Compute the horizontal intermediate over `expand_y(B, r)`, sampling the current scene from `S`.
 2. Sample that intermediate vertically while replacing pixels only in `B`.
 
-Choose a fixed logical sigma and truncation factor, then derive the normalized physical kernel while constructing the operation. Both backends consume that kernel. Initially use integer `texelFetch` taps in Vulkan: `BLEND_FEATURES` does not currently require `SAMPLED_IMAGE_FILTER_LINEAR`, so linear-sampling tap pairing would otherwise add an unprobed format requirement.
+Choose a fixed logical sigma and truncation factor, then derive the physical kernel and normalization while constructing the operation. Both backends consume those parameters. Initially use integer `texelFetch` taps in Vulkan: `BLEND_FEATURES` does not currently require `SAMPLED_IMAGE_FILTER_LINEAR`, so linear-sampling tap pairing would otherwise add an unprobed format requirement.
 
 Sampling must extend outside `B`; only framebuffer edges use clamp-to-edge behavior. Because `texelFetch` does not apply sampler addressing modes, clamp its integer coordinates explicitly in the shader. Clamping at the effect-region edge would produce visible repeated-pixel borders. Blur should run in the compositor's active blend space; Vulkan's floating-point blend buffer is the preferred target where available. Preserve premultiplied-alpha conventions throughout the passes.
 
